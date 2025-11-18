@@ -67,6 +67,9 @@ class ProcessFloatingPanel(QWidget):
         self.resize_start_width = 0
         self.resize_edge_width = 15
 
+        # Drag handling
+        self.drag_position = QPoint()
+
         # Panel persistence attributes
         self.panel_id = None  # ID del panel en la base de datos (None si no está guardado)
 
@@ -115,7 +118,7 @@ class ProcessFloatingPanel(QWidget):
             ProcessFloatingPanel {{
                 background-color: {self.theme.get_color('background_deep')};
                 border: 2px solid #ff8800;
-                border-left: 5px solid #ff8800;
+                border-right: 5px solid #ff8800;
                 border-radius: 12px;
             }}
         """)
@@ -399,38 +402,75 @@ class ProcessFloatingPanel(QWidget):
                 f"Error al cargar proceso:\n{str(e)}"
             )
 
-    def display_step(self, step):
-        """Display a single step with its item or list"""
+    def display_step(self, step, step_number=None):
+        """Display a single step with its item or list
+
+        Args:
+            step: ProcessStep object
+            step_number: Display number for the step (1-based). If None, uses step.step_order + 1
+        """
         # Create step container
         step_widget = QWidget()
         step_layout = QVBoxLayout(step_widget)
         step_layout.setContentsMargins(0, 0, 0, 10)
         step_layout.setSpacing(5)
 
-        # Step header
-        step_header = QLabel(f"Paso {step.step_order + 1}")
-        step_header.setStyleSheet("""
-            QLabel {
-                color: #00ff88;
-                font-size: 10pt;
-                font-weight: bold;
-                padding: 5px;
-                border-bottom: 1px solid #3d3d3d;
-                background-color: transparent;
-            }
-        """)
-        step_layout.addWidget(step_header)
+        # Determine step number to display
+        if step_number is None:
+            step_number = step.step_order + 1
+
+        # Check if this step is a component
+        is_component = getattr(step, 'is_component', False) or (
+            hasattr(step, 'item_id') and step.item_id
+        )
 
         # Display item for this step
         if step.item_id:
             item_dict = self.config_manager.db.get_item(step.item_id)
             if item_dict:
-                # Convert dict to Item object
-                item = Item.from_dict(item_dict)
-                self.all_items.append(item)
-                item_widget = ItemButton(item, self)
-                item_widget.item_clicked.connect(lambda i=item: self.on_item_clicked(i))
-                step_layout.addWidget(item_widget)
+                # Check if item is a component
+                is_component = item_dict.get('is_component', False)
+
+                if is_component:
+                    # Render as component (no step header for components)
+                    component_type = item_dict.get('name_component')
+                    component_config = item_dict.get('component_config', '{}')
+                    label = item_dict.get('label', '')
+                    content = item_dict.get('content', '')
+
+                    # Import component widgets
+                    from views.widgets.component_widgets import create_component_widget
+
+                    # Create component widget
+                    component_widget = create_component_widget(
+                        component_type=component_type,
+                        config=component_config,
+                        label=label,
+                        content=content,
+                        parent=step_widget
+                    )
+                    step_layout.addWidget(component_widget)
+                else:
+                    # Step header for regular items
+                    step_header = QLabel(f"Paso {step_number}")
+                    step_header.setStyleSheet("""
+                        QLabel {
+                            color: #00ff88;
+                            font-size: 10pt;
+                            font-weight: bold;
+                            padding: 5px;
+                            border-bottom: 1px solid #3d3d3d;
+                            background-color: transparent;
+                        }
+                    """)
+                    step_layout.addWidget(step_header)
+
+                    # Convert dict to Item object and display as regular item
+                    item = Item.from_dict(item_dict)
+                    self.all_items.append(item)
+                    item_widget = ItemButton(item, self)
+                    item_widget.item_clicked.connect(lambda i=item: self.on_item_clicked(i))
+                    step_layout.addWidget(item_widget)
             else:
                 logger.warning(f"Item {step.item_id} not found for step {step.id}")
 
@@ -560,7 +600,9 @@ class ProcessFloatingPanel(QWidget):
             # Restore size
             self.content_widget.show()
             self.action_bar.show()
+            # Remove fixed height constraint
             self.setMinimumHeight(400)
+            self.setMaximumHeight(16777215)  # Qt's QWIDGETSIZE_MAX
             if self.normal_height:
                 self.resize(self.normal_width, self.normal_height)
             self.minimize_button.setText("−")
@@ -644,16 +686,38 @@ class ProcessFloatingPanel(QWidget):
         self.all_items = []
         self.all_lists = []
 
-        # If no search query, show all steps
+        # If no search query, show all steps with consecutive numbering
         if not self.search_query:
+            step_counter = 1
             for step in self.all_steps:
-                self.display_step(step)
+                # Only increment counter for non-component steps
+                item_dict = self.config_manager.db.get_item(step.item_id) if step.item_id else None
+                is_component = item_dict.get('is_component', False) if item_dict else False
+
+                if is_component:
+                    # Components don't get numbered
+                    self.display_step(step, step_number=None)
+                else:
+                    # Regular items get consecutive numbering
+                    self.display_step(step, step_number=step_counter)
+                    step_counter += 1
             return
 
-        # Filter steps based on search query
+        # Filter steps based on search query with consecutive numbering
+        step_counter = 1
         for step in self.all_steps:
             if self.step_matches_search(step):
-                self.display_step(step)
+                # Check if it's a component
+                item_dict = self.config_manager.db.get_item(step.item_id) if step.item_id else None
+                is_component = item_dict.get('is_component', False) if item_dict else False
+
+                if is_component:
+                    # Components don't get numbered
+                    self.display_step(step, step_number=None)
+                else:
+                    # Regular items get consecutive numbering
+                    self.display_step(step, step_number=step_counter)
+                    step_counter += 1
 
     def step_matches_search(self, step) -> bool:
         """Check if step matches search query"""
@@ -730,57 +794,66 @@ class ProcessFloatingPanel(QWidget):
             except Exception as e:
                 logger.error(f"Error deleting process panel from database: {e}", exc_info=True)
 
-    # Mouse events for resize (left edge)
+    # Mouse events for resize (right edge) and dragging
     def mousePressEvent(self, event):
-        """Handle mouse press for resize"""
+        """Handle mouse press for dragging or resizing"""
         if event.button() == Qt.MouseButton.LeftButton:
-            if event.position().x() <= self.resize_edge_width:
+            # Check if near right edge for resizing
+            if event.position().x() >= self.width() - self.resize_edge_width:
                 self.resizing = True
                 self.resize_start_x = event.globalPosition().x()
                 self.resize_start_width = self.width()
                 event.accept()
-                return
+            else:
+                # Start dragging
+                self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """Handle mouse move for resize cursor and resizing"""
-        # Update cursor based on position
-        if event.position().x() <= self.resize_edge_width:
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        """Handle mouse move for dragging, resizing, and cursor updates"""
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            if self.resizing:
+                # Handle resizing
+                delta_x = event.globalPosition().x() - self.resize_start_x
+                new_width = self.resize_start_width + int(delta_x)
+
+                # Clamp width
+                if new_width < self.minimumWidth():
+                    new_width = self.minimumWidth()
+                elif new_width > self.maximumWidth():
+                    new_width = self.maximumWidth()
+
+                # Update width (position stays the same, only right edge moves)
+                self.resize(new_width, self.height())
+                event.accept()
+            else:
+                # Handle dragging
+                self.move(event.globalPosition().toPoint() - self.drag_position)
+                event.accept()
         else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
-        # Handle resizing
-        if self.resizing:
-            delta_x = event.globalPosition().x() - self.resize_start_x
-            new_width = self.resize_start_width - int(delta_x)
-
-            # Clamp width
-            if new_width < self.minimumWidth():
-                new_width = self.minimumWidth()
-            elif new_width > self.maximumWidth():
-                new_width = self.maximumWidth()
-
-            # Update width and position
-            old_x = self.x()
-            old_width = self.width()
-            self.resize(new_width, self.height())
-            # Adjust position to keep right edge in place
-            self.move(old_x + (old_width - new_width), self.y())
-
-            event.accept()
-            return
+            # Update cursor based on position (near right edge)
+            if event.position().x() >= self.width() - self.resize_edge_width:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
 
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """Handle mouse release for resize"""
-        if event.button() == Qt.MouseButton.LeftButton and self.resizing:
-            self.resizing = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            # Schedule panel update after resize
-            self.schedule_panel_update()
-            event.accept()
+        """Handle mouse release for resize or drag"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.resizing:
+                self.resizing = False
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                # Schedule panel update after resize
+                self.schedule_panel_update()
+                event.accept()
+            else:
+                # End of drag - schedule panel update
+                self.schedule_panel_update()
+                event.accept()
             return
         super().mouseReleaseEvent(event)
 

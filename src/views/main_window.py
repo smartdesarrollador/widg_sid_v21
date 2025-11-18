@@ -1361,13 +1361,13 @@ class MainWindow(QMainWindow):
 
     def position_process_panel(self, panel):
         """Position process panel near sidebar with offset for pinned panels"""
-        # Position to the right of sidebar
-        sidebar_x = self.x() + self.width()
+        # Position to the left of sidebar
+        panel_x = self.x() - panel.width()
 
         # Calculate offset based on number of pinned process panels
         offset = len(self.pinned_process_panels) * 20
 
-        panel.move(sidebar_x + offset, self.y())
+        panel.move(panel_x - offset, self.y())
         panel.show()
 
     def on_process_executed_from_panel(self, process_id: int):
